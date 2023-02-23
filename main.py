@@ -14,6 +14,29 @@ viz.get_style()
 pth = os.path.dirname(os.path.abspath(__file__))
 
 # ----------------------------------- #
+#             Preprocess              #
+# ----------------------------------- #
+
+def preprocess(data):
+    '''Preprocess the data
+    '''
+
+    col_dict = {
+        'action 1':   'act0',
+        'action 2':   'act1',
+        'reward.1.1': 'rew10',
+        'reward.1.2': 'rew11',
+        'reward.2.1': 'rew20',
+        'reward.2.2': 'rew21',
+        'final_state': 'state1',
+    }
+
+    # rename  
+    data.rename(columns=col_dict, inplace=True)
+
+    return data 
+
+# ----------------------------------- #
 #              The task               #
 # ----------------------------------- #
 
@@ -163,7 +186,7 @@ class twoStageTask:
 class simpleBuffer:
 
     def __init__(self):
-        self.keys = ['s1', 'a1', 'r1', 's2', 'a2', 'r2']
+        self.keys = ['s0', 'a0', 'r0', 's1', 'a1', 'r1']
         self.reset()
 
     def push(self, m_dict):
@@ -237,6 +260,15 @@ class SARSA(baseAgent):
         prob  = softmax(beta*logit)
         act   = rng.choice(self.nA, p=prob)
         return act, prob
+    
+    def eval_act(self, s, a, stage):
+        '''Evaluate the probability of given state and action
+        '''
+        beta  = eval(f'self.beta{int(stage+1)}')
+        repa  = self.prev_a * (stage==0)
+        logit = self.Q_td[s, :] + self.p*repa
+        prob  = softmax(beta*logit)
+        return prob[a]
 
     # ------------ Learning ------------- # 
         
@@ -247,15 +279,15 @@ class SARSA(baseAgent):
         '''Model-free update'''
 
         # achieve data
-        s1, a1, r1, s2, a2, r2 = self.mem.sample(
-            's1', 'a1', 'r1', 's2', 'a2', 'r2')
+        s0, a0, r0, s1, a1, r1 = self.mem.sample(
+            's0', 'a0', 'r0', 's1', 'a1', 'r1')
         
         # stage 2  
-        rpe2 = r2 - self.Q_td[s2, a2]
-        self.Q_td[s2, a2] += self.alpha2 * rpe2
+        rpe1 = r1 - self.Q_td[s1, a1]
+        self.Q_td[s1, a1] += self.alpha2 * rpe1
         # stage 1 
-        rpe1 = r1 + self.Q_td[s2, a2] - self.Q_td[s1, a1]
-        self.Q_td[s1, a1] += self.alpha1 * (rpe1 + self.lmbd*rpe2)
+        rpe0 = r0 + self.Q_td[s1, a1] - self.Q_td[s0, a0]
+        self.Q_td[s0, a0] += self.alpha1 * (rpe0 + self.lmbd*rpe1)
 
 class ModelBase(SARSA):
     '''Model Base RL'''
@@ -319,62 +351,95 @@ class HybridModel(ModelBase):
 #             Simulation              #
 # ----------------------------------- #
 
-def sim(agent, params, seed):
+def set_trans_fn(nS, nA, rho=.7):
+        '''The transition function
+
+                 s0     s1      s2      
+        s0-a0    0      t       1-t   
+        s0-a1    0      1-t     t  
+
+        s1-a0    1      0       0        
+        s1-a1    1      0       0   
+    
+        s2-a0    1      0       0      
+        s2-a1    1      0       0    
+        '''
+        T = np.zeros([nS, nA, nS])
+        # state == 0 
+        T[0, 0, :] = [0, rho, 1-rho]
+        T[0, 1, :] = [0, 1-rho, rho]
+        # state != 0 
+        T[1:, :, 0] = 1
+        # common state 
+        common_state = 1 if rho > .5 else 2
+        return T, common_state
+
+def sim(datum, agent, params, seed):
+    '''The simulation
+
+    Args:
+        datum: the experimental data, containing the stimuli
+        agent: the model used for simulation
+        params: the params used to run the model
+        seed:  the random seed
+    '''
 
     # decide random seed
     rng = np.random.RandomState(seed)
 
-    # instantiate the task and the model 
-    task = twoStageTask(seed=seed*2)
-    model = agent(task.nS, task.nA, params)
+    # define the transition function
+    nS = 3 # stage 1: s=0, stage 2: s=1, s=2
+    nA = 2 # all state has two options
+    trans_fn, common_state = set_trans_fn(nS, nA)
 
-    # storages
-    cols = ['act', 'prob', 'rew', 'stage', 'trial', 'done', 'common', 'stay']
-    init_mat = np.zeros([task.nT*2, len(cols)]) + np.nan
-    data = pd.DataFrame(init_mat, columns=cols)
-    
-    # the first trial 
-    s, info = task.reset()
-    stage = info['stage']
+    # instantiate the task and the model   
+    model = agent(nS, nA, params)
 
-    for i in range(task.nT*2):
-        
-        # get an action 
-        a, prob = model.get_act(s, stage, rng)
-        # step forward
-        s_next, r, done, info = task.step(a)
-        stage = info['stage']
+    # stotages for the predictive data 
+    cols = ['act1', 'act1',  'reward', 'common', 'state1']
+    data.drop(columns=cols, inplace=True)
+    cols += ['prob0', 'prob1', 'stay']
+    init_mat = np.zeros([datum.shape[0], len(cols)]) + np.nan
+    pred_data = pd.DataFrame(init_mat, columns=cols)
+
+    for i, row in datum.iterrows():
+
+        # construc the rew_fn 
+        p_rew = np.array([
+            [0, 0],
+            [row['rew10'], row['rew11']],
+            [row['rew20'], row['rew21']]])
+
+        # stage 1
+        s0 = 0 # input 
+        a0, prob0 = model.get_act(s0, stage=0, rng=rng) # act
+        r0 = 0 
+
+        # transit to stage 2
+        s1 = rng.choice(nS, p=trans_fn[s0, a0, :])
+        a1, prob1 = model.get_act(s1, stage=1, rng=rng)
+        r1 = (rng.rand() < p_rew[s1, a1])*1
 
         # record vars
-        data.loc[i, 'act']    = a
-        data.loc[i, 'rew']    = r
-        data.loc[i, 'prob']   = prob[a]
-        data.loc[i, 'done']   = done 
-        data.loc[i, 'trial']  = task.t
-        data.loc[i, 'stage']  = stage
-        if stage:
-            data.loc[i, 'rewarded']    = 'rewarded' if r else 'unrewarded'
-            data.loc[i-1, 'rewarded']  = 'rewarded' if r else 'unrewarded'
-        else:
-            data.loc[i, 'common'] = info['common']
-            data.loc[i-2, 'stay'] = prob[model.prev_a.argmax()]
+        pred_data.loc[i, 'act0']   = a0
+        pred_data.loc[i, 'prob0']  = prob0[a0]
+        pred_data.loc[i, 'act1']   = a1
+        pred_data.loc[i, 'prob1']  = prob1[a1]
+        pred_data.loc[i, 'state1'] = s1
+        pred_data.loc[i, 'reward'] = r1
+        pred_data.loc[i, 'common'] = (s1 == common_state)*1
+        pred_data.loc[i-1, 'stay'] = prob0[model.prev_a.argmax()]
             
         # cache info  
-        if stage==0: model.prev_a = np.eye(task.nA)[a] 
-        m = {f's{stage+1}': s, f'a{stage+1}': a, f'r{stage+1}':r}
+        model.prev_a = np.eye(nA)[a0] 
+        m = {f's0': s0, f'a0': a0, f'r0': r0, f's1': s1, f'a1': a1, f'r1': r1}
         model.mem.push(m)
-        # the next state 
-        s = s_next  
 
-        # if is the second stage/end of the trial
-        if done: 
-            # 
-            model.update()     
-            # Supplementary materials: "eligibility traces
-            # does not carry over from trial to trial"
-            model.mem.reset()  
+        # Supplementary materials: "eligibility traces
+        # does not carry over from trial to trial"
+        model.update()    
 
-    return data 
+    return pd.concat([data, pred_data], axis=1) 
 
 def n_sim(agent, params, seed, n=20):
 
@@ -385,7 +450,8 @@ def n_sim(agent, params, seed, n=20):
 def show_sim(seed=2023):
 
     # get data 
-    params = [5.19, 3.69, .54, .42, .57, .11, .39]
+    params = [2.76, 2.69, 0.46, 0.21, 0.41, 0.02, 0.29]
+    #[5.19, 3.69, .54, .42, .57, .11, .39]
 
     MFdata = n_sim(SARSA, params, seed, n=25)
     MBdata = n_sim(ModelBase, params, seed, n=25)
@@ -413,11 +479,14 @@ def show_sim(seed=2023):
             
 if __name__ == '__main__':
 
-    agent = SARSA
-    params = [7.45, 5.16, 0.87, 0.71, 0.94, 0.22, 0.59]
-    #params = [5.19, 3.69, .54, .42, .57, .11, .39]
-    seed, i = 2023, 1
-    data = sim(agent, params, seed+i) 
+    #
+    data = pd.read_excel(f'{pth}/data/sub1.xlsx')
+    processed_data = preprocess(data)
 
-    show_sim(seed=3124)
+    # agent = SARSA
+    params = [7.45, 5.16, 0.87, 0.71, 0.94, 0.22, 0.59]
+    seed, i = 2023, 1
+    data = sim(processed_data, SARSA, params, seed+i) 
+
+    # show_sim(seed=3124)
     
