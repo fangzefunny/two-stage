@@ -396,11 +396,12 @@ def sim(datum, agent, params, seed):
     model = agent(nS, nA, params)
 
     # stotages for the predictive data 
-    cols = ['act1', 'act1',  'reward', 'common', 'state1']
-    data.drop(columns=cols, inplace=True)
-    cols += ['prob0', 'prob1', 'stay']
+    cols = ['act0', 'act1',  'reward', 'common', 'state1']
+    datum = datum.drop(columns=cols)
+    cols += ['prob0', 'prob1', 'stay', 'rewarded']
     init_mat = np.zeros([datum.shape[0], len(cols)]) + np.nan
     pred_data = pd.DataFrame(init_mat, columns=cols)
+    nll = 0
 
     for i, row in datum.iterrows():
 
@@ -427,7 +428,8 @@ def sim(datum, agent, params, seed):
         pred_data.loc[i, 'prob1']  = prob1[a1]
         pred_data.loc[i, 'state1'] = s1
         pred_data.loc[i, 'reward'] = r1
-        pred_data.loc[i, 'common'] = (s1 == common_state)*1
+        pred_data.loc[i, 'rewarded'] = 'rewarded' if r1 else 'unrewarded'
+        pred_data.loc[i, 'common'] = 'common' if (s1 == common_state) else 'rare'
         pred_data.loc[i-1, 'stay'] = prob0[model.prev_a.argmax()]
             
         # cache info  
@@ -439,27 +441,25 @@ def sim(datum, agent, params, seed):
         # does not carry over from trial to trial"
         model.update()    
 
-    return pd.concat([data, pred_data], axis=1) 
+    return pd.concat([datum, pred_data], axis=1) 
 
-def n_sim(agent, params, seed, n=20):
+def n_sim(datum, agent, params, seed, n=20):
 
-    data = pd.concat([sim(agent, params, seed+i) 
+    data = pd.concat([sim(datum, agent, params, seed+i) 
             for i in range(n)], ignore_index=True)
     return data 
 
-def show_sim(seed=2023):
+def show_sim(processed_data, seed=2023):
 
     # get data 
-    params = [2.76, 2.69, 0.46, 0.21, 0.41, 0.02, 0.29]
-    #[5.19, 3.69, .54, .42, .57, .11, .39]
+    params = [5.19, 3.69, .54, .42, .57, .11, .39]
+    #[2.76, 2.69, 0.46, 0.21, 0.41, 0.02, 0.29]
 
-    MFdata = n_sim(SARSA, params, seed, n=25)
-    MBdata = n_sim(ModelBase, params, seed, n=25)
+    MFdata = n_sim(processed_data, SARSA, params, seed, n=25)
+    MBdata = n_sim(processed_data, ModelBase, params, seed, n=25)
     titles = ['Model-Free', 'Model-Base']
 
-    data = []
-    data.append(MFdata.query('stage==0 & trial <= 65'))
-    data.append(MBdata.query('stage==0 & trial <= 65'))
+    data = [MFdata, MBdata]
 
     fig, axs = plt.subplots(1, 2, figsize=(7.5, 4), sharey=True)
     for i in range(2):
@@ -475,7 +475,6 @@ def show_sim(seed=2023):
         ax.set_title(titles[i])
     fig.tight_layout()
     plt.savefig(f'{pth}/sim.png')
-
             
 if __name__ == '__main__':
 
@@ -483,10 +482,10 @@ if __name__ == '__main__':
     data = pd.read_excel(f'{pth}/data/sub1.xlsx')
     processed_data = preprocess(data)
 
-    # agent = SARSA
-    params = [7.45, 5.16, 0.87, 0.71, 0.94, 0.22, 0.59]
-    seed, i = 2023, 1
-    data = sim(processed_data, SARSA, params, seed+i) 
+    # # agent = SARSA
+    # params = [7.45, 5.16, 0.87, 0.71, 0.94, 0.22, 0.59]
+    # seed, i = 2023, 1
+    # #data = sim(processed_data, SARSA, params, seed+i) 
 
-    # show_sim(seed=3124)
+    show_sim(processed_data, seed=3124)
     
